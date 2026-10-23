@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>五子棋 · 線上對戰</title>
+<style>
+  :root {
+    --bg: #0f1419;
+    --panel: #1a2332;
+    --board: #c9a66b;
+    --line: #3d2b1f;
+    --accent: #4fc3f7;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; background: var(--bg); color: #e8e8e8;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: flex; flex-direction: column; align-items: center; padding: 16px;
+  }
+  h1 { margin: 8px 0 4px; font-weight: 600; }
+  .sub { color: #90a4ae; font-size: 14px; margin-bottom: 14px; }
+  .panel {
+    background: var(--panel); border-radius: 12px; padding: 14px 18px;
+    width: 100%; max-width: 720px; margin-bottom: 14px;
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between;
+  }
+  .status { font-size: 16px; }
+  .dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+  .dot.b { background: #1a1a1a; box-shadow: 0 0 0 1px #555; }
+  .dot.w { background: #f5f5f5; }
+  button {
+    background: #263238; color: #fff; border: 1px solid #455a64;
+    border-radius: 8px; padding: 8px 14px; cursor: pointer; font-size: 14px;
+  }
+  button:hover { background: #37474f; }
+  button.primary { background: #0277bd; border-color: #0277bd; }
+  button.primary:hover { background: #0288d1; }
+  input {
+    background: #121820; border: 1px solid #455a64; color: #fff;
+    border-radius: 8px; padding: 8px 10px; width: 130px;
+  }
+  .board-wrap { background: var(--board); border-radius: 8px; padding: 16px; box-shadow: 0 8px 30px rgba(0,0,0,.4); }
+  canvas { display: block; cursor: pointer; }
+  .hint { margin-top: 12px; font-size: 13px; color: #90a4ae; text-align: center; }
+  .modal {
+    position: fixed; inset: 0; background: rgba(0,0,0,.7);
+    display: none; align-items: center; justify-content: center; z-index: 20;
+  }
+  .modal.show { display: flex; }
+  .box { background: var(--panel); padding: 22px; border-radius: 12px; width: 90%; max-width: 400px; }
+  .box h3 { margin: 0 0 10px; }
+  .row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  #roomCode { font-size: 22px; letter-spacing: 3px; color: var(--accent); font-weight: 600; }
+</style>
+</head>
+<body>
+  <h1>五子棋 線上對戰</h1>
+  <div class="sub">公開網站 · 不同電腦可加入同一房間</div>
+
+  <div class="panel">
+    <div class="status" id="status">未連線</div>
+    <div class="row">
+      <button id="btnCreate" class="primary">建立房間</button>
+      <input id="codeInput" type="text" placeholder="房間碼" maxlength="6">
+      <button id="btnJoin">加入房間</button>
+      <button id="btnRestart">重新開始</button>
+    </div>
+  </div>
+
+  <div class="board-wrap">
+    <canvas id="board" width="600" height="600"></canvas>
+  </div>
+  <div class="hint" id="hint">建立或加入房間後即可開始</div>
+
+  <div class="modal" id="modal">
+    <div class="box">
+      <h3>房間已建立</h3>
+      <p>把房間碼給朋友：</p>
+      <div id="roomCode">-----</div>
+      <p style="font-size:13px;color:#90a4ae;margin-top:8px;">等待對手加入…</p>
+      <div class="row" style="justify-content:flex-end;">
+        <button id="btnClose">關閉</button>
+      </div>
+    </div>
+  </div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const SIZE = 15, CELL = 40, PAD = 20;
+const canvas = document.getElementById('board');
+const ctx = canvas.getContext('2d');
+const statusEl = document.getElementById('status');
+const hintEl = document.getElementById('hint');
+const modal = document.getElementById('modal');
+const roomCodeEl = document.getElementById('roomCode');
+
+let board = Array.from({length: SIZE}, () => Array(SIZE).fill(0));
+let current = 1;
+let myColor = 0;
+let gameOver = false;
+let lastMove = null;
+let socket = null;
+let inRoom = false;
+
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.strokeStyle = '#3d2b1f';
+  ctx.lineWidth = 1.2;
+  for (let i = 0; i < SIZE; i++) {
+    const p = PAD + i * CELL;
+    ctx.beginPath(); ctx.moveTo(PAD, p); ctx.lineTo(PAD+(SIZE-1)*CELL, p); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(p, PAD); ctx.lineTo(p, PAD+(SIZE-1)*CELL); ctx.stroke();
+  }
+  const stars = [3,7,11];
+  ctx.fillStyle = '#3d2b1f';
+  stars.forEach(r => stars.forEach(c => {
+    ctx.beginPath();
+    ctx.arc(PAD+c*CELL, PAD+r*CELL, 3.5, 0, Math.PI*2);
+    ctx.fill();
+  }));
+  for (let r = 0; r < SIZE; r++) {
+    for (let c = 0; c < SIZE; c++) {
+      if (!board[r][c]) continue;
+      const x = PAD + c*CELL, y = PAD + r*CELL;
+      ctx.beginPath();
+      ctx.arc(x, y, CELL*0.42, 0, Math.PI*2);
+      ctx.fillStyle = board[r][c] === 1 ? '#1a1a1a' : '#f8f8f8';
+      ctx.fill();
+      ctx.strokeStyle = board[r][c] === 1 ? '#000' : '#ddd';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      if (lastMove && lastMove[0]===r && lastMove[1]===c) {
+        ctx.strokeStyle = '#ffeb3b';
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
+      }
+    }
+  }
+}
+
+function updateStatus() {
+  if (!inRoom) { statusEl.textContent = '未進入房間'; return; }
+  if (gameOver) return;
+  const name = current === 1 ? '黑棋' : '白棋';
+  const me = current === myColor ? '（你的回合）' : '（對手回合）';
+  statusEl.innerHTML = `<span class="dot ${current===1?'b':'w'}"></span> 輪到 ${name} ${me}`;
+}
+
+function resetLocal() {
+  board = Array.from({length: SIZE}, () => Array(SIZE).fill(0));
+  current = 1;
+  gameOver = false;
+  lastMove = null;
+  updateStatus();
+  draw();
+}
+
+function connect() {
+  socket = io();
+  socket.on('connect', () => {
+    hintEl.textContent = '已連線伺服器，可建立或加入房間';
+  });
+  socket.on('roomCreated', ({ code, color }) => {
+    myColor = color;
+    inRoom = true;
+    roomCodeEl.textContent = code;
+    modal.classList.add('show');
+    resetLocal();
+    hintEl.textContent = '房間已建立，等待對手加入';
+  });
+  socket.on('joined', ({ code, color }) => {
+    myColor = color;
+    inRoom = true;
+    resetLocal();
+    hintEl.textContent = '已加入房間，你是白棋';
+    modal.classList.remove('show');
+  });
+  socket.on('playerJoined', () => {
+    hintEl.textContent = '對手已加入，遊戲開始！';
+    modal.classList.remove('show');
+  });
+  socket.on('move', (data) => {
+    board[data.r][data.c] = data.color;
+    lastMove = [data.r, data.c];
+    current = data.current;
+    gameOver = data.gameOver;
+    draw();
+    if (data.win) {
+      const who = data.color === 1 ? '黑棋' : '白棋';
+      statusEl.innerHTML = `<span class="dot ${data.color===1?'b':'w'}"></span> ${who} 獲勝！`;
+      hintEl.textContent = '遊戲結束';
+    } else {
+      updateStatus();
+    }
+  });
+  socket.on('restart', () => {
+    resetLocal();
+    hintEl.textContent = '新的一局開始';
+  });
+  socket.on('playerLeft', () => {
+    hintEl.textContent = '對手已離開';
+    statusEl.textContent = '對手離開';
+  });
+  socket.on('errorMsg', (msg) => {
+    hintEl.textContent = msg;
+    alert(msg);
+  });
+  socket.on('sync', (data) => {
+    board = data.board;
+    current = data.current;
+    gameOver = data.gameOver;
+    draw();
+    updateStatus();
+  });
+}
+
+canvas.addEventListener('click', (e) => {
+  if (!inRoom || gameOver || current !== myColor) return;
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const x = (e.clientX - rect.left) * scaleX;
+  const y = (e.clientY - rect.top) * scaleY;
+  const c = Math.round((x - PAD) / CELL);
+  const r = Math.round((y - PAD) / CELL);
+  if (r < 0 || r >= SIZE || c < 0 || c >= SIZE) return;
+  if (board[r][c] !== 0) return;
+  socket.emit('move', { r, c });
+});
+
+document.getElementById('btnCreate').onclick = () => {
+  if (!socket) connect();
+  socket.emit('createRoom');
+};
+document.getElementById('btnJoin').onclick = () => {
+  const code = document.getElementById('codeInput').value.trim().toUpperCase();
+  if (!code) return alert('請輸入房間碼');
+  if (!socket) connect();
+  socket.emit('joinRoom', code);
+};
+document.getElementById('btnRestart').onclick = () => {
+  if (socket && inRoom) socket.emit('restart');
+};
+document.getElementById('btnClose').onclick = () => modal.classList.remove('show');
+
+// auto connect on load
+connect();
+draw();
+</script>
+</body>
+</html>
