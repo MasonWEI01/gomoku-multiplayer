@@ -70,6 +70,7 @@
     </div>
     <div class="row">
       <button id="btnCreate" class="primary">建立房間</button>
+      <button id="btnAI">和AI對局</button>
       <input id="codeInput" type="text" placeholder="房間碼" maxlength="6">
       <button id="btnJoin">加入對局</button>
       <button id="btnSpectate">旁觀</button>
@@ -82,7 +83,21 @@
   </div>
   <div class="hint" id="hint">建立或加入房間後即可開始 · 兩人成局後可旁觀</div>
 
-  <div class="modal" id="modal">
+  <div class="modal" id="aiModal">
+    <div class="box">
+      <h3>和 AI 對局</h3>
+      <p>選擇難度：</p>
+      <div class="row">
+        <button data-diff="easy">簡單</button>
+        <button data-diff="medium" class="primary">中等</button>
+        <button data-diff="hard">困難</button>
+      </div>
+      <p style="font-size:13px;color:#90a4ae;margin-top:10px;">簡單：隨機優選<br>中等：評估函數攻防<br>困難：強威脅偵測 + 優先防守</p>
+      <div class="row" style="justify-content:flex-end;margin-top:12px;">
+        <button id="btnCloseAI">取消</button>
+      </div>
+    </div>
+  </div>
     <div class="box">
       <h3>房間已建立</h3>
       <p>把房間碼給朋友：</p>
@@ -181,10 +196,37 @@ function resetLocal() {
   draw();
 }
 
-function connect() {
+const aiModal = document.getElementById('aiModal');
+
+document.getElementById('btnAI').onclick = () => aiModal.classList.add('show');
+document.getElementById('btnCloseAI').onclick = () => aiModal.classList.remove('show');
+
+document.querySelectorAll('#aiModal [data-diff]').forEach(btn => {
+  btn.onclick = () => {
+    const diff = btn.dataset.diff;
+    aiModal.classList.remove('show');
+    if (!socket) connect();
+    socket.emit('createAIRoom', { difficulty: diff });
+  };
+});
+
+// AI room created
+socketHandlers = function() { /* placeholder to avoid redeclare */ };
   socket = io();
   socket.on('connect', () => {
     hintEl.textContent = '已連線伺服器 · 建立房間或輸入房間碼加入／旁觀';
+  });
+
+  socket.on('aiRoomCreated', ({ code, color, difficulty }) => {
+    myColor = color;
+    myRole = 'player';
+    inRoom = true;
+    showRoomCode(code);
+    modal.classList.remove('show');
+    resetLocal();
+    const diffName = {easy:'簡單', medium:'中等', hard:'困難'}[difficulty] || difficulty;
+    hintEl.textContent = `與 AI（${diffName}）對局中 · 房間碼可邀請旁觀`;
+    updateStatus();
   });
 
   socket.on('roomCreated', ({ code, color }) => {
