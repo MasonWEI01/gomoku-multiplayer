@@ -113,7 +113,7 @@ let gameOver = false;
 let lastMove = null;
 let socket = null;
 let inRoom = false;
-let myRole = null; // 'player' | 'spectator'
+let myRole = null;
 let currentRoomCode = '';
 
 function draw() {
@@ -207,9 +207,22 @@ function connect() {
     modal.classList.remove('show');
   });
 
+  // 修正：對手加入後，房主也要關閉等候視窗並進入對局
   socket.on('gameStarted', ({ code }) => {
     showRoomCode(code);
+    modal.classList.remove('show');
     hintEl.textContent = '對局已開始！可把房間碼給朋友旁觀';
+    updateStatus();
+  });
+
+  socket.on('playerJoined', ({ players }) => {
+    if (players >= 2) {
+      modal.classList.remove('show');
+      hintEl.textContent = '對手已加入，對局開始！';
+      updateStatus();
+    } else {
+      hintEl.textContent = '對手已加入';
+    }
   });
 
   socket.on('spectating', ({ code }) => {
@@ -220,10 +233,6 @@ function connect() {
     modal.classList.remove('show');
     hintEl.textContent = '旁觀模式 · 僅觀看，無法落子';
     updateStatus();
-  });
-
-  socket.on('playerJoined', () => {
-    hintEl.textContent = '對手已加入';
   });
 
   socket.on('spectatorJoined', ({ count }) => {
