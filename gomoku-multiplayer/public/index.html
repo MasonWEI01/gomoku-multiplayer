@@ -26,6 +26,10 @@
     display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between;
   }
   .status { font-size: 16px; }
+  .room-display {
+    font-size: 15px; color: var(--accent); font-weight: 600; letter-spacing: 1px;
+    background: #121820; padding: 6px 12px; border-radius: 8px;
+  }
   .dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
   .dot.b { background: #1a1a1a; box-shadow: 0 0 0 1px #555; }
   .dot.w { background: #f5f5f5; }
@@ -36,6 +40,7 @@
   button:hover { background: #37474f; }
   button.primary { background: #0277bd; border-color: #0277bd; }
   button.primary:hover { background: #0288d1; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
   input {
     background: #121820; border: 1px solid #455a64; color: #fff;
     border-radius: 8px; padding: 8px 10px; width: 130px;
@@ -56,14 +61,18 @@
 </head>
 <body>
   <h1>五子棋 線上對戰</h1>
-  <div class="sub">公開網站 · 不同電腦可加入同一房間</div>
+  <div class="sub">公開網站 · 支援旁觀模式</div>
 
   <div class="panel">
-    <div class="status" id="status">未連線</div>
+    <div>
+      <div class="status" id="status">未連線</div>
+      <div class="room-display" id="roomDisplay" style="display:none; margin-top:6px;">房間碼：-----</div>
+    </div>
     <div class="row">
       <button id="btnCreate" class="primary">建立房間</button>
       <input id="codeInput" type="text" placeholder="房間碼" maxlength="6">
-      <button id="btnJoin">加入房間</button>
+      <button id="btnJoin">加入對局</button>
+      <button id="btnSpectate">旁觀</button>
       <button id="btnRestart">重新開始</button>
     </div>
   </div>
@@ -71,7 +80,7 @@
   <div class="board-wrap">
     <canvas id="board" width="600" height="600"></canvas>
   </div>
-  <div class="hint" id="hint">建立或加入房間後即可開始</div>
+  <div class="hint" id="hint">建立或加入房間後即可開始 · 兩人成局後可旁觀</div>
 
   <div class="modal" id="modal">
     <div class="box">
@@ -94,6 +103,8 @@ const statusEl = document.getElementById('status');
 const hintEl = document.getElementById('hint');
 const modal = document.getElementById('modal');
 const roomCodeEl = document.getElementById('roomCode');
+const roomDisplay = document.getElementById('roomDisplay');
+const btnSpectate = document.getElementById('btnSpectate');
 
 let board = Array.from({length: SIZE}, () => Array(SIZE).fill(0));
 let current = 1;
@@ -102,6 +113,8 @@ let gameOver = false;
 let lastMove = null;
 let socket = null;
 let inRoom = false;
+let myRole = null; // 'player' | 'spectator'
+let currentRoomCode = '';
 
 function draw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -141,10 +154,22 @@ function draw() {
 
 function updateStatus() {
   if (!inRoom) { statusEl.textContent = '未進入房間'; return; }
+  if (myRole === 'spectator') {
+    const name = current === 1 ? '黑棋' : '白棋';
+    statusEl.innerHTML = `<span class="dot ${current===1?'b':'w'}"></span> 旁觀中 · 輪到 ${name}`;
+    return;
+  }
   if (gameOver) return;
   const name = current === 1 ? '黑棋' : '白棋';
   const me = current === myColor ? '（你的回合）' : '（對手回合）';
   statusEl.innerHTML = `<span class="dot ${current===1?'b':'w'}"></span> 輪到 ${name} ${me}`;
+}
+
+function showRoomCode(code) {
+  currentRoomCode = code;
+  roomDisplay.textContent = '房間碼：' + code;
+  roomDisplay.style.display = 'block';
+  roomCodeEl.textContent = code;
 }
 
 function resetLocal() {
@@ -159,27 +184,54 @@ function resetLocal() {
 function connect() {
   socket = io();
   socket.on('connect', () => {
-    hintEl.textContent = '已連線伺服器，可建立或加入房間';
+    hintEl.textContent = '已連線伺服器 · 建立房間或輸入房間碼加入／旁觀';
   });
+
   socket.on('roomCreated', ({ code, color }) => {
     myColor = color;
+    myRole = 'player';
     inRoom = true;
-    roomCodeEl.textContent = code;
+    showRoomCode(code);
     modal.classList.add('show');
     resetLocal();
-    hintEl.textContent = '房間已建立，等待對手加入';
+    hintEl.textContent = '房間已建立，等待對手加入後即可開始';
   });
+
   socket.on('joined', ({ code, color }) => {
     myColor = color;
+    myRole = 'player';
     inRoom = true;
+    showRoomCode(code);
     resetLocal();
-    hintEl.textContent = '已加入房間，你是白棋';
+    hintEl.textContent = '已加入對局，你是白棋';
     modal.classList.remove('show');
   });
+
+  socket.on('gameStarted', ({ code }) => {
+    showRoomCode(code);
+    hintEl.textContent = '對局已開始！可把房間碼給朋友旁觀';
+  });
+
+  socket.on('spectating', ({ code }) => {
+    myRole = 'spectator';
+    myColor = 0;
+    inRoom = true;
+    showRoomCode(code);
+    modal.classList.remove('show');
+    hintEl.textContent = '旁觀模式 · 僅觀看，無法落子';
+    updateStatus();
+  });
+
   socket.on('playerJoined', () => {
-    hintEl.textContent = '對手已加入，遊戲開始！';
-    modal.classList.remove('show');
+    hintEl.textContent = '對手已加入';
   });
+
+  socket.on('spectatorJoined', ({ count }) => {
+    if (myRole === 'player') {
+      hintEl.textContent = `有 ${count} 人正在旁觀`;
+    }
+  });
+
   socket.on('move', (data) => {
     board[data.r][data.c] = data.color;
     lastMove = [data.r, data.c];
@@ -194,18 +246,22 @@ function connect() {
       updateStatus();
     }
   });
+
   socket.on('restart', () => {
     resetLocal();
     hintEl.textContent = '新的一局開始';
   });
+
   socket.on('playerLeft', () => {
-    hintEl.textContent = '對手已離開';
-    statusEl.textContent = '對手離開';
+    hintEl.textContent = '有玩家離開';
+    statusEl.textContent = '玩家離開';
   });
+
   socket.on('errorMsg', (msg) => {
     hintEl.textContent = msg;
     alert(msg);
   });
+
   socket.on('sync', (data) => {
     board = data.board;
     current = data.current;
@@ -216,7 +272,7 @@ function connect() {
 }
 
 canvas.addEventListener('click', (e) => {
-  if (!inRoom || gameOver || current !== myColor) return;
+  if (!inRoom || gameOver || myRole !== 'player' || current !== myColor) return;
   const rect = canvas.getBoundingClientRect();
   const scaleX = canvas.width / rect.width;
   const scaleY = canvas.height / rect.height;
@@ -233,18 +289,27 @@ document.getElementById('btnCreate').onclick = () => {
   if (!socket) connect();
   socket.emit('createRoom');
 };
+
 document.getElementById('btnJoin').onclick = () => {
   const code = document.getElementById('codeInput').value.trim().toUpperCase();
   if (!code) return alert('請輸入房間碼');
   if (!socket) connect();
   socket.emit('joinRoom', code);
 };
-document.getElementById('btnRestart').onclick = () => {
-  if (socket && inRoom) socket.emit('restart');
+
+btnSpectate.onclick = () => {
+  const code = document.getElementById('codeInput').value.trim().toUpperCase();
+  if (!code) return alert('請輸入房間碼');
+  if (!socket) connect();
+  socket.emit('spectate', code);
 };
+
+document.getElementById('btnRestart').onclick = () => {
+  if (socket && inRoom && myRole === 'player') socket.emit('restart');
+};
+
 document.getElementById('btnClose').onclick = () => modal.classList.remove('show');
 
-// auto connect on load
 connect();
 draw();
 </script>
