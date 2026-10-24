@@ -11,7 +11,7 @@ const io = new Server(server, {
 
 const PORT = process.env.PORT || 3000;
 
-// rooms: { code: { players: [socketId, socketId], board, current, gameOver, host } }
+// rooms: { code: { players: [socketId...], spectators: [socketId...], board, current, gameOver, host, started } }
 const rooms = new Map();
 
 function generateCode() {
@@ -34,14 +34,17 @@ io.on('connection', (socket) => {
     const code = generateCode();
     rooms.set(code, {
       players: [socket.id],
+      spectators: [],
       board: emptyBoard(),
       current: 1,
       gameOver: false,
-      host: socket.id
+      host: socket.id,
+      started: false
     });
     socket.join(code);
     socket.roomCode = code;
     socket.color = 1;
+    socket.role = 'player';
     socket.emit('roomCreated', { code, color: 1 });
   });
 
@@ -53,16 +56,20 @@ io.on('connection', (socket) => {
       return;
     }
     if (room.players.length >= 2) {
-      socket.emit('errorMsg', '房間已滿');
+      socket.emit('errorMsg', '房間已滿，可改用旁觀模式');
       return;
     }
     room.players.push(socket.id);
     socket.join(code);
     socket.roomCode = code;
     socket.color = 2;
+    socket.role = 'player';
     socket.emit('joined', { code, color: 2 });
+    if (room.players.length === 2) {
+      room.started = true;
+      io.to(code).emit('gameStarted', { code });
+    }
     io.to(code).emit('playerJoined', { players: room.players.length });
-    // sync current state
     socket.emit('sync', {
       board: room.board,
       current: room.current,
@@ -70,11 +77,35 @@ io.on('connection', (socket) => {
     });
   });
 
+  socket.on('spectate', (code) => {
+    code = (code || '').toUpperCase().trim();
+    const room = rooms.get(code);
+    if (!room) {
+      socket.emit('errorMsg', '房間不存在');
+      return;
+    }
+    if (!room.started || room.players.length < 2) {
+      socket.emit('errorMsg', '對局尚未開始，暫時無法旁觀');
+      return;
+    }
+    room.spectators.push(socket.id);
+    socket.join(code);
+    socket.roomCode = code;
+    socket.role = 'spectator';
+    socket.emit('spectating', { code });
+    socket.emit('sync', {
+      board: room.board,
+      current: room.current,
+      gameOver: room.gameOver
+    });
+    io.to(code).emit('spectatorJoined', { count: room.spectators.length });
+  });
+
   socket.on('move', ({ r, c }) => {
     const code = socket.roomCode;
     if (!code) return;
     const room = rooms.get(code);
-    if (!room || room.gameOver) return;
+    if (!room || room.gameOver || socket.role !== 'player') return;
     if (room.current !== socket.color) return;
     if (room.board[r][c] !== 0) return;
 
@@ -95,7 +126,7 @@ io.on('connection', (socket) => {
     const code = socket.roomCode;
     if (!code) return;
     const room = rooms.get(code);
-    if (!room) return;
+    if (!room || socket.role !== 'player') return;
     room.board = emptyBoard();
     room.current = 1;
     room.gameOver = false;
@@ -107,8 +138,16 @@ io.on('connection', (socket) => {
     if (!code) return;
     const room = rooms.get(code);
     if (!room) return;
-    room.players = room.players.filter(id => id !== socket.id);
-    io.to(code).emit('playerLeft');
+
+    if (socket.role === 'player') {
+      room.players = room.players.filter(id => id !== socket.id);
+      room.started = room.players.length >= 2;
+      io.to(code).emit('playerLeft');
+    } else if (socket.role === 'spectator') {
+      room.spectators = room.spectators.filter(id => id !== socket.id);
+      io.to(code).emit('spectatorLeft', { count: room.spectators.length });
+    }
+
     if (room.players.length === 0) {
       rooms.delete(code);
     }
