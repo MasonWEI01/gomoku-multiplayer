@@ -5,13 +5,10 @@ const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, {
-  cors: { origin: '*' }
-});
-
+const io = new Server(server, { cors: { origin: '*' } });
 const PORT = process.env.PORT || 3000;
+const SIZE = 15;
 
-// rooms: { code: { players: [socketId...], spectators: [socketId...], board, current, gameOver, host, started } }
 const rooms = new Map();
 
 function generateCode() {
@@ -22,140 +19,117 @@ function generateCode() {
 }
 
 function emptyBoard() {
-  return Array.from({ length: 15 }, () => Array(15).fill(0));
+  return Array.from({ length: SIZE }, () => Array(SIZE).fill(0));
 }
 
-app.use(express.static(path.join(__dirname, 'public')));
-
-io.on('connection', (socket) => {
-  console.log('connected', socket.id);
-
-  socket.on('createRoom', () => {
-    const code = generateCode();
-    rooms.set(code, {
-      players: [socket.id],
-      spectators: [],
-      board: emptyBoard(),
-      current: 1,
-      gameOver: false,
-      host: socket.id,
-      started: false
-    });
-    socket.join(code);
-    socket.roomCode = code;
-    socket.color = 1;
-    socket.role = 'player';
-    socket.emit('roomCreated', { code, color: 1 });
-  });
-
-  socket.on('joinRoom', (code) => {
-    code = (code || '').toUpperCase().trim();
-    const room = rooms.get(code);
-    if (!room) {
-      socket.emit('errorMsg', '房間不存在');
-      return;
+// ---------- AI Core ----------
+function getCandidates(board) {
+  const set = new Set();
+  let hasStone = false;
+  for (let r = 0; r < SIZE; r++) {
+    for (let c = 0; c < SIZE; c++) {
+      if (board[r][c] !== 0) {
+        hasStone = true;
+        for (let dr = -2; dr <= 2; dr++) {
+          for (let dc = -2; dc <= 2; dc++) {
+            const nr = r + dr, nc = c + dc;
+            if (nr >= 0 && nr < SIZE && nc >= 0 && nc < SIZE && board[nr][nc] === 0) {
+              set.add(nr * SIZE + nc);
+            }
+          }
+        }
+      }
     }
-    if (room.players.length >= 2) {
-      socket.emit('errorMsg', '房間已滿，可改用旁觀模式');
-      return;
+  }
+  if (!hasStone) return [[7, 7]];
+  return Array.from(set).map(k => [Math.floor(k / SIZE), k % SIZE]);
+}
+
+function scorePoint(board, r, c, color) {
+  if (board[r][c] !== 0) return -1;
+  const opp = 3 - color;
+  let score = 0;
+  const dirs = [[0,1],[1,0],[1,1],[1,-1]];
+
+  for (const [dr, dc] of dirs) {
+    let own = 0, empty = 0, blocked = 0;
+    // count own continuous
+    for (let d = 1; d < 5; d++) {
+      const nr = r + dr * d, nc = c + dc * d;
+      if (nr < 0 || nr >= SIZE || nc < 0 || nc >= SIZE || board[nr][nc] === opp) { blocked++; break; }
+      if (board[nr][nc] === color) own++;
+      else { empty++; break; }
     }
-    room.players.push(socket.id);
-    socket.join(code);
-    socket.roomCode = code;
-    socket.color = 2;
-    socket.role = 'player';
-    socket.emit('joined', { code, color: 2 });
-    if (room.players.length === 2) {
-      room.started = true;
-      io.to(code).emit('gameStarted', { code });
+    for (let d = 1; d < 5; d++) {
+      const nr = r - dr * d, nc = c - dc * d;
+      if (nr < 0 || nr >= SIZE || nc < 0 || nc >= SIZE || board[nr][nc] === opp) { blocked++; break; }
+      if (board[nr][nc] === color) own++;
+      else { empty++; break; }
     }
-    io.to(code).emit('playerJoined', { players: room.players.length });
-    socket.emit('sync', {
-      board: room.board,
-      current: room.current,
-      gameOver: room.gameOver
-    });
-  });
+    const len = own + 1;
+    if (len >= 5) score += 1000000;
+    else if (len === 4 && empty >= 2 && blocked === 0) score += 50000;   // 活四
+    else if (len === 4 && empty >= 1) score += 10000;                    // 冲四
+    else if (len === 3 && empty >= 2 && blocked === 0) score += 5000;    // 活三
+    else if (len === 3 && empty >= 1) score += 500;                      // 眠三
+    else if (len === 2 && empty >= 2) score += 100;                      // 活二
+    else if (len === 2) score += 20;
+  }
+  // center bias
+  score += (7 - Math.abs(r - 7)) + (7 - Math.abs(c - 7));
+  return score;
+}
 
-  socket.on('spectate', (code) => {
-    code = (code || '').toUpperCase().trim();
-    const room = rooms.get(code);
-    if (!room) {
-      socket.emit('errorMsg', '房間不存在');
-      return;
+function aiMove(board, difficulty) {
+  const candidates = getCandidates(board);
+  if (candidates.length === 0) return null;
+
+  // Immediate win
+  for (const [r, c] of candidates) {
+    board[r][c] = 2;
+    if (checkWin(board, r, c, 2)) { board[r][c] = 0; return [r, c]; }
+    board[r][c] = 0;
+  }
+  // Immediate block
+  for (const [r, c] of candidates) {
+    board[r][c] = 1;
+    if (checkWin(board, r, c, 1)) { board[r][c] = 0; return [r, c]; }
+    board[r][c] = 0;
+  }
+
+  if (difficulty === 'easy') {
+    // random among top half of scored moves
+    const scored = candidates.map(([r, c]) => ({ r, c, s: scorePoint(board, r, c, 2) }));
+    scored.sort((a, b) => b.s - a.s);
+    const top = scored.slice(0, Math.max(1, Math.floor(scored.length / 2)));
+    const pick = top[Math.floor(Math.random() * top.length)];
+    return [pick.r, pick.c];
+  }
+
+  if (difficulty === 'medium') {
+    let best = -Infinity, bestMove = candidates[0];
+    for (const [r, c] of candidates) {
+      const s = scorePoint(board, r, c, 2) * 1.1 + scorePoint(board, r, c, 1);
+      if (s > best) { best = s; bestMove = [r, c]; }
     }
-    if (!room.started || room.players.length < 2) {
-      socket.emit('errorMsg', '對局尚未開始，暫時無法旁觀');
-      return;
-    }
-    room.spectators.push(socket.id);
-    socket.join(code);
-    socket.roomCode = code;
-    socket.role = 'spectator';
-    socket.emit('spectating', { code });
-    socket.emit('sync', {
-      board: room.board,
-      current: room.current,
-      gameOver: room.gameOver
-    });
-    io.to(code).emit('spectatorJoined', { count: room.spectators.length });
-  });
+    return bestMove;
+  }
 
-  socket.on('move', ({ r, c }) => {
-    const code = socket.roomCode;
-    if (!code) return;
-    const room = rooms.get(code);
-    if (!room || room.gameOver || socket.role !== 'player') return;
-    if (room.current !== socket.color) return;
-    if (room.board[r][c] !== 0) return;
-
-    room.board[r][c] = socket.color;
-    const win = checkWin(room.board, r, c, socket.color);
-    if (win) room.gameOver = true;
-    else room.current = 3 - room.current;
-
-    io.to(code).emit('move', {
-      r, c, color: socket.color,
-      current: room.current,
-      gameOver: room.gameOver,
-      win
-    });
-  });
-
-  socket.on('restart', () => {
-    const code = socket.roomCode;
-    if (!code) return;
-    const room = rooms.get(code);
-    if (!room || socket.role !== 'player') return;
-    room.board = emptyBoard();
-    room.current = 1;
-    room.gameOver = false;
-    io.to(code).emit('restart');
-  });
-
-  socket.on('disconnect', () => {
-    const code = socket.roomCode;
-    if (!code) return;
-    const room = rooms.get(code);
-    if (!room) return;
-
-    if (socket.role === 'player') {
-      room.players = room.players.filter(id => id !== socket.id);
-      room.started = room.players.length >= 2;
-      io.to(code).emit('playerLeft');
-    } else if (socket.role === 'spectator') {
-      room.spectators = room.spectators.filter(id => id !== socket.id);
-      io.to(code).emit('spectatorLeft', { count: room.spectators.length });
-    }
-
-    if (room.players.length === 0) {
-      rooms.delete(code);
-    }
-  });
-});
+  // hard: 1-ply + threat priority
+  let best = -Infinity, bestMove = candidates[0];
+  for (const [r, c] of candidates) {
+    const attack = scorePoint(board, r, c, 2);
+    const defense = scorePoint(board, r, c, 1);
+    let s = attack * 1.2 + defense * 1.1;
+    // extra bonus for creating live three / four
+    if (attack >= 5000) s += 2000;
+    if (defense >= 5000) s += 3000;
+    if (s > best) { best = s; bestMove = [r, c]; }
+  }
+  return bestMove;
+}
 
 function checkWin(board, r, c, color) {
-  const SIZE = 15;
   const dirs = [[0,1],[1,0],[1,1],[1,-1]];
   for (const [dr, dc] of dirs) {
     let count = 1;
@@ -174,6 +148,145 @@ function checkWin(board, r, c, color) {
   return false;
 }
 
-server.listen(PORT, () => {
-  console.log(`Gomoku server running on port ${PORT}`);
+// ---------- Socket ----------
+app.use(express.static(path.join(__dirname, 'public')));
+
+io.on('connection', (socket) => {
+  socket.on('createRoom', () => {
+    const code = generateCode();
+    rooms.set(code, {
+      players: [socket.id],
+      spectators: [],
+      board: emptyBoard(),
+      current: 1,
+      gameOver: false,
+      host: socket.id,
+      started: false,
+      ai: null
+    });
+    socket.join(code);
+    socket.roomCode = code;
+    socket.color = 1;
+    socket.role = 'player';
+    socket.emit('roomCreated', { code, color: 1 });
+  });
+
+  socket.on('createAIRoom', ({ difficulty }) => {
+    const code = generateCode();
+    const diff = ['easy', 'medium', 'hard'].includes(difficulty) ? difficulty : 'medium';
+    rooms.set(code, {
+      players: [socket.id, 'AI'],
+      spectators: [],
+      board: emptyBoard(),
+      current: 1,
+      gameOver: false,
+      host: socket.id,
+      started: true,
+      ai: diff
+    });
+    socket.join(code);
+    socket.roomCode = code;
+    socket.color = 1;
+    socket.role = 'player';
+    socket.emit('aiRoomCreated', { code, color: 1, difficulty: diff });
+    io.to(code).emit('gameStarted', { code });
+  });
+
+  socket.on('joinRoom', (code) => {
+    code = (code || '').toUpperCase().trim();
+    const room = rooms.get(code);
+    if (!room) return socket.emit('errorMsg', '房間不存在');
+    if (room.ai) return socket.emit('errorMsg', '此為人機對局，請用旁觀模式');
+    if (room.players.length >= 2) return socket.emit('errorMsg', '房間已滿，可改用旁觀模式');
+
+    room.players.push(socket.id);
+    socket.join(code);
+    socket.roomCode = code;
+    socket.color = 2;
+    socket.role = 'player';
+    socket.emit('joined', { code, color: 2 });
+    if (room.players.length === 2) {
+      room.started = true;
+      io.to(code).emit('gameStarted', { code });
+    }
+    io.to(code).emit('playerJoined', { players: room.players.length });
+    socket.emit('sync', { board: room.board, current: room.current, gameOver: room.gameOver });
+  });
+
+  socket.on('spectate', (code) => {
+    code = (code || '').toUpperCase().trim();
+    const room = rooms.get(code);
+    if (!room) return socket.emit('errorMsg', '房間不存在');
+    if (!room.started) return socket.emit('errorMsg', '對局尚未開始，暫時無法旁觀');
+
+    room.spectators.push(socket.id);
+    socket.join(code);
+    socket.roomCode = code;
+    socket.role = 'spectator';
+    socket.emit('spectating', { code });
+    socket.emit('sync', { board: room.board, current: room.current, gameOver: room.gameOver });
+    io.to(code).emit('spectatorJoined', { count: room.spectators.length });
+  });
+
+  socket.on('move', ({ r, c }) => {
+    const code = socket.roomCode;
+    if (!code) return;
+    const room = rooms.get(code);
+    if (!room || room.gameOver || socket.role !== 'player') return;
+    if (room.current !== socket.color) return;
+    if (room.board[r][c] !== 0) return;
+
+    room.board[r][c] = socket.color;
+    const win = checkWin(room.board, r, c, socket.color);
+    if (win) {
+      room.gameOver = true;
+      io.to(code).emit('move', { r, c, color: socket.color, current: room.current, gameOver: true, win: true });
+      return;
+    }
+    room.current = 3 - room.current;
+    io.to(code).emit('move', { r, c, color: socket.color, current: room.current, gameOver: false, win: false });
+
+    // AI reply
+    if (room.ai && room.current === 2 && !room.gameOver) {
+      setTimeout(() => {
+        const move = aiMove(room.board, room.ai);
+        if (!move) return;
+        const [ar, ac] = move;
+        room.board[ar][ac] = 2;
+        const aiWin = checkWin(room.board, ar, ac, 2);
+        if (aiWin) room.gameOver = true;
+        else room.current = 1;
+        io.to(code).emit('move', { r: ar, c: ac, color: 2, current: room.current, gameOver: room.gameOver, win: aiWin });
+      }, 400);
+    }
+  });
+
+  socket.on('restart', () => {
+    const code = socket.roomCode;
+    if (!code) return;
+    const room = rooms.get(code);
+    if (!room || socket.role !== 'player') return;
+    room.board = emptyBoard();
+    room.current = 1;
+    room.gameOver = false;
+    io.to(code).emit('restart');
+  });
+
+  socket.on('disconnect', () => {
+    const code = socket.roomCode;
+    if (!code) return;
+    const room = rooms.get(code);
+    if (!room) return;
+    if (socket.role === 'player' && !room.ai) {
+      room.players = room.players.filter(id => id !== socket.id);
+      room.started = room.players.length >= 2;
+      io.to(code).emit('playerLeft');
+    } else if (socket.role === 'spectator') {
+      room.spectators = room.spectators.filter(id => id !== socket.id);
+      io.to(code).emit('spectatorLeft', { count: room.spectators.length });
+    }
+    if (room.players.filter(p => p !== 'AI').length === 0) rooms.delete(code);
+  });
 });
+
+server.listen(PORT, () => console.log(`Gomoku server on ${PORT}`));
