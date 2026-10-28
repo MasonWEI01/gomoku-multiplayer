@@ -111,6 +111,7 @@
       <h3>對局資訊</h3>
       <div class="player-row"><span class="dot b"></span> <span id="blackName">黑棋：等待中</span></div>
       <div class="player-row"><span class="dot w"></span> <span id="whiteName">白棋：等待中</span></div>
+      <div id="scoreLine" style="margin-top:10px;font-size:14px;color:var(--accent);font-weight:600;">比分：0 : 0</div>
       <div style="margin-top:14px;font-size:14px;">旁觀人數：<b id="specCount">0</b></div>
       <div class="spec-list" id="specList"></div>
     </div>
@@ -269,6 +270,10 @@ function connect() {
     whiteNameEl.textContent = '白棋：' + (info.white || '等待中');
     specCountEl.textContent = info.spectatorCount || 0;
     specListEl.innerHTML = (info.spectators || []).map(n => `<div>· ${n}</div>`).join('') || '<div style="color:#78909c;">暫無旁觀</div>';
+    const scoreEl = document.getElementById('scoreLine');
+    if (scoreEl && info.scoreText) {
+      scoreEl.textContent = info.scoreText;
+    }
   });
 
   socket.on('move', (data) => {
@@ -284,7 +289,12 @@ function connect() {
     } else updateStatus();
   });
 
-  socket.on('restart', () => { resetLocal(); hintEl.textContent = '新的一局開始'; });
+  socket.on('restart', (data) => {
+    resetLocal();
+    if (data && data.starter) current = data.starter;
+    hintEl.textContent = '新的一局開始（先手：' + (current === 1 ? '黑棋' : '白棋') + '）';
+    updateStatus();
+  });
   socket.on('playerLeft', () => { hintEl.textContent = '有玩家離開'; });
   socket.on('errorMsg', (msg) => { hintEl.textContent = msg; alert(msg); });
   socket.on('sync', (data) => {
