@@ -131,12 +131,17 @@ function broadcastInfo(code) {
   if (!room) return;
   const black = room.players.find(p => p.color === 1);
   const white = room.players.find(p => p.color === 2);
+  const bn = black ? black.name : '等待中';
+  const wn = white ? white.name : (room.ai ? 'AI' : '等待中');
   io.to(code).emit('roomInfo', {
-    black: black ? black.name : '等待中',
-    white: white ? white.name : (room.ai ? 'AI' : '等待中'),
+    black: bn,
+    white: wn,
     spectators: room.spectators.map(s => s.name),
     spectatorCount: room.spectators.length,
-    isAI: !!room.ai
+    isAI: !!room.ai,
+    blackWins: room.blackWins || 0,
+    whiteWins: room.whiteWins || 0,
+    scoreText: `${bn} : ${wn} = ${room.blackWins || 0}:${room.whiteWins || 0}`
   });
 }
 
@@ -169,7 +174,10 @@ io.on('connection', (socket) => {
       gameOver: false,
       host: socket.id,
       started: false,
-      ai: null
+      ai: null,
+      blackWins: 0,
+      whiteWins: 0,
+      nextStarter: 1
     });
     socket.join(code);
     socket.roomCode = code;
@@ -193,7 +201,10 @@ io.on('connection', (socket) => {
       gameOver: false,
       host: socket.id,
       started: true,
-      ai: diff
+      ai: diff,
+      blackWins: 0,
+      whiteWins: 0,
+      nextStarter: 1
     });
     socket.join(code);
     socket.roomCode = code;
@@ -251,7 +262,11 @@ io.on('connection', (socket) => {
     const win = checkWin(room.board, r, c, socket.color);
     if (win) {
       room.gameOver = true;
+      if (socket.color === 1) room.blackWins = (room.blackWins || 0) + 1;
+      else room.whiteWins = (room.whiteWins || 0) + 1;
+      room.nextStarter = socket.color;
       io.to(code).emit('move', { r, c, color: socket.color, current: room.current, gameOver: true, win: true });
+      broadcastInfo(code);
       return;
     }
     room.current = 3 - room.current;
@@ -264,8 +279,12 @@ io.on('connection', (socket) => {
         const [ar, ac] = mv;
         room.board[ar][ac] = 2;
         const aiWin = checkWin(room.board, ar, ac, 2);
-        if (aiWin) room.gameOver = true;
-        else room.current = 1;
+        if (aiWin) {
+          room.gameOver = true;
+          room.whiteWins = (room.whiteWins || 0) + 1;
+          room.nextStarter = 2;
+          broadcastInfo(code);
+        } else room.current = 1;
         io.to(code).emit('move', { r: ar, c: ac, color: 2, current: room.current, gameOver: room.gameOver, win: aiWin });
       }, 350);
     }
@@ -277,9 +296,10 @@ io.on('connection', (socket) => {
     const room = rooms.get(code);
     if (!room || socket.role !== 'player') return;
     room.board = emptyBoard();
-    room.current = 1;
+    room.current = room.nextStarter || 1;
     room.gameOver = false;
-    io.to(code).emit('restart');
+    io.to(code).emit('restart', { starter: room.current });
+    broadcastInfo(code);
   });
 
   socket.on('disconnect', () => {
